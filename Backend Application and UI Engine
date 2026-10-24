@@ -1,0 +1,487 @@
+"""SignSpeak ISL: High-Precision Gesture Interpreter & Web UI in one file.
+
+Installation:
+    pip install fastapi "uvicorn[standard]" numpy scikit-learn joblib
+
+Run:
+    python signspeak_app.py
+    # Opens at http://localhost:8000
+"""
+import json
+import os
+import sqlite3
+import threading
+from pathlib import Path
+from typing import Annotated, Optional
+
+import joblib
+import numpy as np
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse, FileResponse
+from pydantic import BaseModel, Field
+from sklearn.model_selection import StratifiedKFold, cross_val_score
+from sklearn.neighbors import KNeighborsClassifier
+
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = Path(os.getenv("SIGNSPEAK_DATA_DIR", BASE_DIR / "data"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+DB_PATH = DATA_DIR / "samples.db"
+MODEL_PATH = DATA_DIR / "model.joblib"
+HAND_MODEL = DATA_DIR / "hand_landmarker.task"
+HAND_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
+
+MIN_CONFIDENCE = float(os.getenv("SIGNSPEAK_MIN_CONFIDENCE", "0.45"))
+MIN_PER_CLASS = 6
+LOCK = threading.Lock()
+
+# ---------- 22 ISL 101 Vocabulary Dictionary ----------
+ISL_101_DICTIONARY = {
+    "Hello": {
+        "meaning": "Friendly Greeting / Namaste", "hindi": "नमस्ते / प्रणाम",
+        "type": "Dynamic (Horizontal Wave)", "category": "Greetings", "icon": "👋",
+        "desc": "Open flat palm facing outward towards the camera, waving side-to-side gently."
+    },
+    "Thank you": {
+        "meaning": "Gratitude / Dhanyavaad", "hindi": "धन्यवाद / शुक्रिया",
+        "type": "Dynamic (Chin Forward Arc)", "category": "Greetings", "icon": "🙏",
+        "desc": "Flat fingers touching chin/lower lip, then extending smoothly forward and downward."
+    },
+    "Please": {
+        "meaning": "Polite Request / Kripya", "hindi": "कृपया / विनती",
+        "type": "Static / Small Circle", "category": "Greetings", "icon": "🤲",
+        "desc": "Open flat palm moving in a gentle, respectful circular rub over the chest."
+    },
+    "Sorry": {
+        "meaning": "Apology / Regret / Maafi", "hindi": "माफ़ी / क्षमा",
+        "type": "Dynamic (Fist Circular)", "category": "Greetings", "icon": "🙇",
+        "desc": "Closed fist with knuckles performing small circular rubbing motions over the chest."
+    },
+    "Welcome": {
+        "meaning": "Hospitality / Swagatam", "hindi": "स्वागत है",
+        "type": "Dynamic (Inward Sweep)", "category": "Greetings", "icon": "🤝",
+        "desc": "Both open palms facing up, sweeping smoothly inward toward the body."
+    },
+    "Yes": {
+        "meaning": "Affirmation / Agreement / Haan", "hindi": "हाँ / सहमति",
+        "type": "Dynamic (Vertical Nod)", "category": "Responses", "icon": "✅",
+        "desc": "Closed fist tilting up and down at the wrist, mimicking a head nodding yes."
+    },
+    "No": {
+        "meaning": "Negation / Disagreement / Nahi", "hindi": "नहीं / असहमति",
+        "type": "Dynamic (Horizontal Snap)", "category": "Responses", "icon": "❌",
+        "desc": "Index and middle fingers snapping to meet the thumb, or hand waving side-to-side."
+    },
+    "Help": {
+        "meaning": "Emergency Assistance / Madad", "hindi": "मदद / सहायता",
+        "type": "Dynamic (Upward Lift)", "category": "Emergency", "icon": "🆘",
+        "desc": "Closed fist with thumb up, lifting vertically upward."
+    },
+    "Water": {
+        "meaning": "Drinking Water / Paani", "hindi": "पानी / जल",
+        "type": "Static Posture ('W' Shape)", "category": "Essentials", "icon": "💧",
+        "desc": "Index, middle, and ring fingers extended in 'W' shape tapping gently near the chin."
+    },
+    "Food": {
+        "meaning": "Meals / Eating / Khaana", "hindi": "खाना / भोजन",
+        "type": "Dynamic (Mouth Tap)", "category": "Essentials", "icon": "🍲",
+        "desc": "All five fingertips gathered together in a pinch shape, tapping lightly near the mouth."
+    },
+    "Doctor": {
+        "meaning": "Medical Physician / Chikitsak", "hindi": "डॉक्टर / चिकित्सक",
+        "type": "Static Posture (Wrist Pulse)", "category": "Medical", "icon": "🩺",
+        "desc": "Index and middle fingers tapping the radial pulse on the inside of the wrist."
+    },
+    "Medicine": {
+        "meaning": "Prescription / Tablets / Dawai", "hindi": "दवाई / औषधि",
+        "type": "Dynamic (Palm Grind)", "category": "Medical", "icon": "💊",
+        "desc": "Thumb and middle finger rubbing in circular grinding motion in the center of the palm."
+    },
+    "Money": {
+        "meaning": "Currency / Cash / Paisa", "hindi": "पैसे / धन",
+        "type": "Dynamic (Fingertip Rub)", "category": "Essentials", "icon": "💰",
+        "desc": "Thumb rubbing repeatedly against the tips of the index and middle fingers."
+    },
+    "Wait": {
+        "meaning": "Hold On / Pause / Ruko", "hindi": "रुको / इंतज़ार",
+        "type": "Static Hold (Stop Posture)", "category": "Responses", "icon": "✋",
+        "desc": "Open hand with spread fingers held stationary facing forward, signaling to halt."
+    },
+    "What": {
+        "meaning": "Inquiry: What? / Kya?", "hindi": "क्या / प्रश्न",
+        "type": "Dynamic (Palms Up Shake)", "category": "Questions", "icon": "❓",
+        "desc": "Open palms facing upward, shaking side-to-side with a questioning expression."
+    },
+    "Where": {
+        "meaning": "Location Inquiry / Kahan?", "hindi": "कहाँ / किस जगह",
+        "type": "Dynamic (Index Finger Wag)", "category": "Questions", "icon": "📍",
+        "desc": "Single index finger pointing upward, wagging gently side-to-side."
+    },
+    "Who": {
+        "meaning": "Identity Inquiry / Kaun?", "hindi": "कौन / व्यक्ति",
+        "type": "Dynamic (Mouth Circle)", "category": "Questions", "icon": "👤",
+        "desc": "Index finger extended, performing small circular movements around the mouth."
+    },
+    "Why": {
+        "meaning": "Reason Inquiry / Kyun?", "hindi": "क्यों / वजह",
+        "type": "Dynamic ('Y' Shape Shake)", "category": "Questions", "icon": "🤔",
+        "desc": "Thumb and pinky finger extended in 'Y' shape, gently rotating or shaking."
+    },
+    "Friend": {
+        "meaning": "Companionship / Dost", "hindi": "दोस्त / मित्र",
+        "type": "Dynamic (Interlocking)", "category": "Relations", "icon": "🫂",
+        "desc": "Curved index fingers hooking and unhooking together."
+    },
+    "Father": {
+        "meaning": "Paternal / Pitaji", "hindi": "पिताजी / पापा",
+        "type": "Static Posture (Forehead)", "category": "Relations", "icon": "👨",
+        "desc": "Open hand with thumb touching the center of the forehead or temple."
+    },
+    "Mother": {
+        "meaning": "Maternal / Mataji", "hindi": "माताजी / माँ",
+        "type": "Static Posture (Cheek/Chin)", "category": "Relations", "icon": "👩",
+        "desc": "Open hand with thumb touching the side of the chin or cheek."
+    },
+    "Name": {
+        "meaning": "Identity / Naam", "hindi": "नाम / पहचान",
+        "type": "Dynamic ('H' Shape Tap)", "category": "General", "icon": "🏷️",
+        "desc": "Index and middle fingers extended together horizontally ('H' shape), tapping."
+    }
+}
+
+DEFAULT_VOCAB = list(ISL_101_DICTIONARY.keys())
+
+
+# ---------- Pydantic Data Models ----------
+class Landmark(BaseModel):
+    x: float
+    y: float
+    z: float
+
+
+Hand = Annotated[list[Landmark], Field(min_length=21, max_length=21)]
+
+
+class PredictRequest(BaseModel):
+    landmarks: Hand
+    sequence: Optional[list[Hand]] = None
+
+
+class SampleBatch(BaseModel):
+    label: str = Field(min_length=1, max_length=40)
+    samples: list[Hand] = Field(min_length=1, max_length=200)
+
+
+class ClosestMatch(BaseModel):
+    sign: str
+    similarity: int  # 0 to 100%
+    meaning: str
+    hindi: str
+    icon: str
+    type: str
+
+
+class Prediction(BaseModel):
+    label: Optional[str] = None
+    confidence: float = Field(ge=0.0, le=1.0)
+    status: str
+    message: str
+    meaning: Optional[str] = None
+    hindi: Optional[str] = None
+    desc: Optional[str] = None
+    description: Optional[str] = None
+    category: Optional[str] = None
+    icon: Optional[str] = None
+    gesture_type: Optional[str] = None
+    motion_state: Optional[str] = None
+    speed_px: Optional[float] = None
+    finger_summary: Optional[str] = None
+    closest_matches: list[ClosestMatch] = []
+
+
+# ---------- Features & Kinematic Engine ----------
+def features(hand) -> np.ndarray:
+    """Wrist-centred, scale-normalised 63-D vector."""
+    a = np.array([[p.x, p.y, p.z] for p in hand], dtype=float)
+    a -= a[0]
+    scale = np.linalg.norm(a[:, :2], axis=1).max()
+    if scale < 1e-6:
+        raise ValueError("Degenerate hand landmarks.")
+    return (a / scale).flatten()
+
+
+def analyze_kinematics(landmarks, sequence=None):
+    """Computes robust anatomical finger flexion states and movement dynamics."""
+    raw = np.array([[p.x, p.y, p.z] for p in landmarks], dtype=float)
+    wrist = raw[0]
+    palm_len = max(np.linalg.norm(raw[9] - wrist), 1e-4)
+
+    # Anatomical finger extension check
+    dist_thumb_pinky = np.linalg.norm(raw[4] - raw[17]) / palm_len
+    dist_thumb_ext = np.linalg.norm(raw[4] - raw[2]) / palm_len
+    thumb_is_open = bool(dist_thumb_pinky > 1.12 and dist_thumb_ext > 0.62)
+
+    finger_indices = [(8, 6, 5), (12, 10, 9), (16, 14, 13), (20, 18, 17)]
+    ext_states = [thumb_is_open]
+    for tip, pip, mcp in finger_indices:
+        d_tip_wrist = np.linalg.norm(raw[tip] - wrist)
+        d_pip_wrist = np.linalg.norm(raw[pip] - wrist)
+        d_tip_mcp = np.linalg.norm(raw[tip] - raw[mcp])
+        d_pip_mcp = np.linalg.norm(raw[pip] - raw[mcp])
+        is_open = (d_tip_wrist > d_pip_wrist * 1.08) and (d_tip_mcp > d_pip_mcp * 1.15)
+        ext_states.append(bool(is_open))
+
+    open_fingers = []
+    names = ["Thumb", "Index", "Middle", "Ring", "Pinky"]
+    for i, ext in enumerate(ext_states):
+        if ext:
+            open_fingers.append(names[i])
+    finger_summary = ", ".join(open_fingers) + " OPEN" if open_fingers else "All Fingers CURLED (Fist)"
+
+    # Movement trajectory analysis
+    is_moving = False
+    motion_state = "Stationary / Holding"
+    motion_type = "static"
+    speed_px = 0.0
+
+    if sequence and len(sequence) >= 2:
+        seq_raw = np.array([[[p.x, p.y, p.z] for p in f] for f in sequence], dtype=float)
+        wrists = seq_raw[:, 0, :]
+        diffs = np.diff(wrists, axis=0)
+        speeds = np.linalg.norm(diffs, axis=-1)
+        speed_px = float(speeds.mean() * 1000)
+
+        disp = wrists[-1] - wrists[0]
+        total_travel = float(np.linalg.norm(disp))
+
+        if speed_px > 12.0 or total_travel > 0.05:
+            is_moving = True
+            dx, dy, dz = disp[0], disp[1], disp[2]
+            abs_x, abs_y, abs_z = abs(dx), abs(dy), abs(dz)
+            if abs_z > abs_x and abs_z > abs_y and abs_z > 0.035:
+                motion_state = "Forward Trajectory ↗" if dz > 0 else "Inward Sweep ↙"
+                motion_type = "forward" if dz > 0 else "inward"
+            elif abs_y > abs_x and abs_y > 0.035:
+                motion_state = "Upward Lift ↑" if dy < 0 else "Downward Motion ↓"
+                motion_type = "lift" if dy < 0 else "down"
+            elif abs_x > 0.035:
+                motion_state = "Horizontal Sweep ↔"
+                motion_type = "wave"
+            elif speed_px > 18.0:
+                motion_state = "Oscillating / Shaking ↔"
+                motion_type = "shake"
+            else:
+                motion_state = "Fingertip Motion / Tapping 👆"
+                motion_type = "tap"
+
+    return {
+        "finger_states": ext_states,
+        "finger_summary": finger_summary,
+        "is_moving": is_moving,
+        "motion_state": motion_state,
+        "motion_type": motion_type,
+        "speed_px": round(speed_px, 1),
+        "hand_y": float(raw[:, 1].mean())
+    }
+
+
+# Canonical finger requirement specifications:
+SIGN_RULES = {
+    "Hello":      {"fingers": [1, 1, 1, 1, 1], "motion": "wave"},
+    "Thank you":  {"fingers": [None, 1, 1, 1, 1], "motion": "forward"},
+    "Please":     {"fingers": [None, 1, 1, 1, 1], "motion": "static"},
+    "Sorry":      {"fingers": [0, 0, 0, 0, 0], "motion": "circle"},
+    "Welcome":    {"fingers": [1, 1, 1, 1, 1], "motion": "inward"},
+    "Yes":        {"fingers": [0, 0, 0, 0, 0], "motion": "nod"},
+    "No":         {"fingers": [None, 1, 1, 0, 0], "motion": "shake"},
+    "Help":       {"fingers": [1, 0, 0, 0, 0], "motion": "lift"},
+    "Water":      {"fingers": [0, 1, 1, 1, 0], "motion": "any"},
+    "Food":       {"fingers": [None, 0, 0, 0, 0], "motion": "tap"},
+    "Doctor":     {"fingers": [0, 1, 1, 0, 0], "motion": "any"},
+    "Medicine":   {"fingers": [None, 1, 0, 0, 0], "motion": "circle"},
+    "Money":      {"fingers": [1, 1, 1, 0, 0], "motion": "rub"},
+    "Wait":       {"fingers": [1, 1, 1, 1, 1], "motion": "static"},
+    "What":       {"fingers": [1, 1, 1, 1, 1], "motion": "shake"},
+    "Where":      {"fingers": [0, 1, 0, 0, 0], "motion": "wag"},
+    "Who":        {"fingers": [0, 1, 0, 0, 0], "motion": "circle"},
+    "Why":        {"fingers": [1, 0, 0, 0, 1], "motion": "shake"},
+    "Friend":     {"fingers": [0, 1, 0, 0, 0], "motion": "hook"},
+    "Father":     {"fingers": [1, 1, 1, 1, 1], "motion": "any"},
+    "Mother":     {"fingers": [1, 1, 1, 1, 1], "motion": "any"},
+    "Name":       {"fingers": [0, 1, 1, 0, 0], "motion": "tap"},
+}
+
+
+# ---------- Storage & Model Loading ----------
+def db():
+    con = sqlite3.connect(DB_PATH)
+    con.execute("CREATE TABLE IF NOT EXISTS samples (id INTEGER PRIMARY KEY, label TEXT NOT NULL, f TEXT NOT NULL)")
+    return con
+
+
+def counts() -> dict:
+    with db() as con:
+        return dict(con.execute("SELECT label, COUNT(*) FROM samples GROUP BY label").fetchall())
+
+
+MODEL: Optional[dict] = None
+STALE = False
+
+
+def load_model():
+    global MODEL
+    MODEL = joblib.load(MODEL_PATH) if MODEL_PATH.is_file() else None
+
+
+load_model()
+
+app = FastAPI(title="SignSpeak ISL API", version="2.0.0")
+
+
+def info() -> dict:
+    c = counts()
+    return {
+        "status": "ok", "service": "signspeak-isl-precision",
+        "model_loaded": MODEL is not None,
+        "model_stale": bool(STALE),
+        "classes": MODEL["labels"] if MODEL else [],
+        "cv_accuracy": MODEL["accuracy"] if MODEL else None,
+        "trained_on": MODEL["n"] if MODEL else 0,
+        "sample_counts": c,
+        "default_vocab": DEFAULT_VOCAB,
+        "min_confidence": MIN_CONFIDENCE
+    }
+
+
+# ---------- API Routes ----------
+@app.get("/api/health")
+def health():
+    return info()
+
+
+@app.get("/api/dictionary")
+def get_dictionary():
+    return ISL_101_DICTIONARY
+
+
+@app.post("/api/predict", response_model=Prediction)
+def predict(payload: PredictRequest):
+    m = MODEL
+    if m is None:
+        return Prediction(label=None, confidence=0.0, status="model_unavailable",
+                          message="No model trained yet.")
+    try:
+        kin = analyze_kinematics(payload.landmarks, payload.sequence)
+        x = features(payload.landmarks).reshape(1, -1)
+        x_mirrored = x.copy()
+        for idx in range(0, 63, 3):
+            x_mirrored[0, idx] = -x_mirrored[0, idx]
+
+        X_train = m["clf"]._fit_X
+        y_labels = m["clf"].classes_[m["clf"]._y]
+
+        ext = kin["finger_states"]
+        m_type = kin.get("motion_type", "static")
+        hand_y = kin.get("hand_y", 0.5)
+
+        # Multi-factor Closeness Engine across all 22 ISL signs
+        candidate_scores = {}
+        for s in ISL_101_DICTIONARY.keys():
+            class_indices = np.where(y_labels == s)[0]
+            if len(class_indices) == 0:
+                continue
+            samples = X_train[class_indices]
+            d_orig = float(np.linalg.norm(samples - x, axis=1).min())
+            d_mirr = float(np.linalg.norm(samples - x_mirrored, axis=1).min())
+            min_dist = min(d_orig, d_mirr)
+
+            # 1. 3D Shape Proximity
+            shape_sim = 1.0 / (1.0 + min_dist * 0.75)
+
+            # 2. Finger Flexion Compatibility
+            rule = SIGN_RULES.get(s, {})
+            req_f = rule.get("fingers", [None] * 5)
+            mismatches, checked = 0, 0
+            for u_f, r_f in zip(ext, req_f):
+                if r_f is not None:
+                    checked += 1
+                    if bool(u_f) != bool(r_f):
+                        mismatches += 1
+            finger_sim = 1.0 - (mismatches / max(checked, 1))
+
+            # 3. Dynamic Motion & Position Compatibility
+            motion_bonus = 0.0
+            req_m = rule.get("motion", "any")
+            if req_m != "any":
+                if req_m == m_type:
+                    motion_bonus += 0.08
+                elif m_type != "static" and req_m in ["wave", "shake", "circle", "nod", "lift"]:
+                    motion_bonus += 0.04
+                elif m_type == "static" and req_m == "static":
+                    motion_bonus += 0.06
+
+            if s == "Father" and hand_y < 0.38:
+                motion_bonus += 0.08
+            elif s == "Mother" and 0.40 <= hand_y <= 0.65:
+                motion_bonus += 0.06
+
+            score = (0.50 * shape_sim) + (0.42 * finger_sim) + motion_bonus
+            candidate_scores[s] = (score, min_dist)
+
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Recognition error.") from exc
+
+    ranked = sorted(candidate_scores.items(), key=lambda kv: kv[1][0], reverse=True)
+    if not ranked:
+        return Prediction(label=None, confidence=0.0, status="outlier",
+                          message="No recognizable hand sign detected.")
+
+    best_sign, (best_score, best_dist) = ranked[0]
+    best_meta = ISL_101_DICTIONARY.get(best_sign, {})
+
+    closest_matches = []
+    for s_name, (sc, dist_val) in ranked[:3]:
+        s_meta = ISL_101_DICTIONARY.get(s_name, {})
+        pct = int(np.clip(sc * 105, 15, 99))
+        closest_matches.append(ClosestMatch(
+            sign=s_name,
+            similarity=pct,
+            meaning=s_meta.get("meaning", s_name),
+            hindi=s_meta.get("hindi", ""),
+            icon=s_meta.get("icon", "✋"),
+            type=s_meta.get("type", "Static / Dynamic")
+        ))
+
+    conf = float(np.clip(best_score * 0.98, 0.40, 0.99))
+    is_solid = (conf >= MIN_CONFIDENCE and best_dist <= 2.80)
+    status_str = "recognized" if is_solid else "interpreting"
+
+    return Prediction(
+        label=best_sign,
+        confidence=conf,
+        status=status_str,
+        message="Sign interpreted successfully.",
+        meaning=best_meta.get("meaning", best_sign),
+        hindi=best_meta.get("hindi", ""),
+        desc=best_meta.get("desc", ""),
+        description=best_meta.get("desc", ""),
+        category=best_meta.get("category", "General"),
+        icon=best_meta.get("icon", "✋"),
+        gesture_type=best_meta.get("type", "Static / Dynamic"),
+        motion_state=kin["motion_state"],
+        speed_px=kin["speed_px"],
+        finger_summary=kin["finger_summary"],
+        closest_matches=closest_matches
+    )
+
+
+@app.get("/", response_class=HTMLResponse)
+def home():
+    return INDEX_HTML
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+
