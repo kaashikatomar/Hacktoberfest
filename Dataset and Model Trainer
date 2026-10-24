@@ -1,0 +1,153 @@
+"""Augmented ISL 101 Dataset Generator and Multi-Sign Model Trainer."""
+import json
+import random
+import sqlite3
+from pathlib import Path
+import numpy as np
+import joblib
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.model_selection import StratifiedKFold, cross_val_score
+
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+DB_PATH = DATA_DIR / "samples.db"
+MODEL_PATH = DATA_DIR / "model.joblib"
+
+SIGNS = [
+    "Hello", "Thank you", "Please", "Sorry", "Welcome", "Yes", "No",
+    "Help", "Water", "Food", "Doctor", "Medicine", "Money", "Wait",
+    "What", "Where", "Who", "Why", "Friend", "Father", "Mother", "Name"
+]
+
+
+def make_hand(thumb_mode="open", index_curl=0.0, middle_curl=0.0, ring_curl=0.0, pinky_curl=0.0, spread=1.0):
+    hand = np.zeros((21, 3))
+    hand[0] = [0.0, 0.0, 0.0]  # Wrist
+
+    if thumb_mode == "open":
+        hand[1] = [-0.15, 0.15, 0.0]; hand[2] = [-0.28, 0.30, 0.02]
+        hand[3] = [-0.38, 0.44, 0.03]; hand[4] = [-0.48, 0.58, 0.04]
+    elif thumb_mode == "thumbs_up":
+        hand[1] = [-0.10, 0.16, 0.05]; hand[2] = [-0.12, 0.35, 0.10]
+        hand[3] = [-0.10, 0.52, 0.12]; hand[4] = [-0.08, 0.68, 0.14]
+    elif thumb_mode == "fist":
+        hand[1] = [-0.10, 0.14, 0.05]; hand[2] = [-0.12, 0.28, 0.10]
+        hand[3] = [-0.05, 0.36, 0.12]; hand[4] = [0.04, 0.38, 0.14]
+    elif thumb_mode == "tucked":
+        hand[1] = [-0.08, 0.14, 0.02]; hand[2] = [-0.06, 0.26, 0.06]
+        hand[3] = [0.06, 0.32, 0.08]; hand[4] = [0.18, 0.34, 0.08]
+    elif thumb_mode == "pinch":
+        hand[1] = [-0.10, 0.15, 0.04]; hand[2] = [-0.16, 0.32, 0.08]
+        hand[3] = [-0.14, 0.48, 0.10]; hand[4] = [-0.08, 0.60, 0.10]
+
+    mcps = [
+        [-0.16 * spread, 0.50, 0.0],
+        [0.0, 0.54, 0.0],
+        [0.16 * spread, 0.50, 0.0],
+        [0.30 * spread, 0.42, 0.0]
+    ]
+    curls = [index_curl, middle_curl, ring_curl, pinky_curl]
+
+    for f_idx, (mcp, curl) in enumerate(zip(mcps, curls)):
+        start = 5 + f_idx * 4
+        hand[start] = mcp
+        if curl < 0.2:
+            hand[start + 1] = [mcp[0] * 1.05, mcp[1] + 0.22, 0.0]
+            hand[start + 2] = [mcp[0] * 1.10, mcp[1] + 0.38, 0.0]
+            hand[start + 3] = [mcp[0] * 1.15, mcp[1] + 0.52, 0.0]
+        elif curl > 0.8:
+            hand[start + 1] = [mcp[0], mcp[1] + 0.10, 0.12]
+            hand[start + 2] = [mcp[0] * 0.9, mcp[1] + 0.02, 0.16]
+            hand[start + 3] = [mcp[0] * 0.8, mcp[1] - 0.06, 0.10]
+        else:
+            hand[start + 1] = [mcp[0], mcp[1] + 0.16, 0.08]
+            hand[start + 2] = [mcp[0], mcp[1] + 0.22, 0.12]
+            hand[start + 3] = [mcp[0], mcp[1] + 0.24, 0.08]
+
+    return hand
+
+
+def get_sign_pose(name: str) -> np.ndarray:
+    if name == "Hello": return make_hand("open", 0.0, 0.0, 0.0, 0.0, spread=1.1)
+    if name == "Thank you": return make_hand("tucked", 0.0, 0.0, 0.0, 0.0, spread=0.85)
+    if name == "Please": return make_hand("tucked", 0.08, 0.08, 0.08, 0.08, spread=0.90)
+    if name == "Sorry": return make_hand("fist", 1.0, 1.0, 1.0, 1.0)
+    if name == "Welcome": return make_hand("open", 0.25, 0.25, 0.25, 0.25, spread=0.95)
+    if name == "Yes": return make_hand("fist", 1.0, 1.0, 1.0, 1.0)
+    if name == "No": return make_hand("pinch", 0.35, 0.35, 1.0, 1.0)
+    if name == "Help": return make_hand("thumbs_up", 1.0, 1.0, 1.0, 1.0)
+    if name == "Water": return make_hand("tucked", 0.0, 0.0, 0.0, 1.0, spread=1.28)
+    if name == "Food": return make_hand("pinch", 0.60, 0.60, 0.60, 0.60)
+    if name == "Doctor": return make_hand("fist", 0.0, 0.0, 1.0, 1.0, spread=0.8)
+    if name == "Medicine": return make_hand("pinch", 0.10, 0.50, 1.0, 1.0)
+    if name == "Money": return make_hand("pinch", 0.25, 0.25, 1.0, 1.0)
+    if name == "Wait": return make_hand("open", 0.0, 0.0, 0.0, 0.0, spread=1.35)
+    if name == "What": return make_hand("open", 0.15, 0.15, 0.15, 0.15, spread=1.15)
+    if name == "Where": return make_hand("fist", 0.0, 1.0, 1.0, 1.0)
+    if name == "Who": return make_hand("fist", 0.20, 1.0, 1.0, 1.0)
+    if name == "Why": return make_hand("open", 1.0, 1.0, 1.0, 0.0, spread=1.1)
+    if name == "Friend": return make_hand("fist", 0.45, 1.0, 1.0, 1.0)
+    if name == "Father": return make_hand("open", 0.0, 0.0, 0.0, 0.0, spread=1.0)
+    if name == "Mother": return make_hand("open", 0.0, 0.0, 0.0, 0.0, spread=1.0)
+    if name == "Name": return make_hand("tucked", 0.0, 0.0, 1.0, 1.0, spread=0.55)
+    return make_hand("open")
+
+
+def extract_features(hand_coords: np.ndarray) -> np.ndarray:
+    a = np.array(hand_coords, dtype=float)
+    a -= a[0]
+    scale = np.linalg.norm(a[:, :2], axis=1).max()
+    if scale < 1e-6:
+        raise ValueError("Degenerate hand landmarks.")
+    return (a / scale).flatten()
+
+
+def generate_dataset_and_train():
+    con = sqlite3.connect(DB_PATH)
+    con.execute("DROP TABLE IF EXISTS samples")
+    con.execute("CREATE TABLE samples (id INTEGER PRIMARY KEY, label TEXT NOT NULL, f TEXT NOT NULL)")
+
+    rows, X_train, y_train = [], [], []
+
+    for sign in SIGNS:
+        base = get_sign_pose(sign)
+        for i in range(30):
+            noisy = base.copy()
+            noise = np.random.normal(0, 0.012, noisy.shape)
+            noisy += noise
+            scale = random.uniform(0.92, 1.08)
+            noisy *= scale
+
+            f_vec = extract_features(noisy)
+            rows.append((sign, json.dumps(f_vec.round(5).tolist())))
+            X_train.append(f_vec)
+            y_train.append(sign)
+
+    con.executemany("INSERT INTO samples (label, f) VALUES (?, ?)", rows)
+    con.commit()
+    con.close()
+
+    X_train = np.array(X_train)
+    y_train = np.array(y_train)
+
+    clf = KNeighborsClassifier(n_neighbors=3, weights="distance").fit(X_train, y_train)
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    scores = cross_val_score(clf, X_train, y_train, cv=cv)
+    acc = float(scores.mean())
+
+    model_data = {
+        "clf": clf,
+        "labels": SIGNS,
+        "accuracy": round(acc, 4),
+        "n": int(len(y_train)),
+        "max_dist": 2.60
+    }
+    joblib.dump(model_data, MODEL_PATH)
+    print(f"Dataset generated: {len(X_train)} samples across {len(SIGNS)} signs.")
+    print(f"5-Fold Cross-Validation Accuracy: {acc * 100:.2f}%")
+    return model_data
+
+
+if __name__ == "__main__":
+    generate_dataset_and_train()
