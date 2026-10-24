@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>SignSpeak ISL: Sign-to-Speech Prototype</title>
+<style>
+:root{--bg:#f7f5ef;--card:#fff;--ink:#1d2b27;--mute:#5b6a65;--line:#d9d6cb;--pri:#2b5d4f;--priInk:#fff;--acc:#3f6fd1;--ok:#1f7a45;--warn:#a05a00;--err:#b3261e;--chip:#eef2ef;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#101715;--card:#18221f;--ink:#e8efec;--mute:#9db0aa;--line:#2c3a36;--pri:#6fc3a8;--priInk:#0b1613;--acc:#8fb0ff;--ok:#6fd49a;--warn:#f0b35a;--err:#ff8a80;--chip:#202d29}}
+:root[data-theme="dark"]{--bg:#101715;--card:#18221f;--ink:#e8efec;--mute:#9db0aa;--line:#2c3a36;--pri:#6fc3a8;--priInk:#0b1613;--acc:#8fb0ff;--ok:#6fd49a;--warn:#f0b35a;--err:#ff8a80;--chip:#202d29}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);background:var(--bg);z-index:10}
+a{color:var(--acc)}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;padding:16px clamp(16px,4vw,32px);border-bottom:1px solid var(--line)}
+h1{font-size:1.4rem;margin:0}h1 span{color:var(--acc)}
+.tag{margin:0;color:var(--mute);font-size:.95rem}
+main{max-width:1100px;margin:0 auto;padding:16px clamp(16px,4vw,32px) 48px;display:grid;gap:16px}
+.banner{background:var(--chip);border:1px solid var(--line);border-left:4px solid var(--warn);border-radius:10px;padding:12px 14px;font-size:.92rem}
+.grid{display:grid;gap:16px;grid-template-columns:1fr}
+@media(min-width:860px){.grid{grid-template-columns:1.1fr 1fr}}
+section{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;min-width:0}
+h2{font-size:1.05rem;margin:0 0 10px}
+.video{position:relative;aspect-ratio:4/3;background:#0c1311;border-radius:10px;overflow:hidden;display:grid;place-items:center;color:#cfe0da;text-align:center}
+.video video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1);display:none}
+.video.on video{display:block}.video.on .ph{display:none}
+.ph{padding:20px;font-size:.95rem}
+.row{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+button,input,textarea{font:inherit;color:inherit}
+button{border:1px solid var(--line);background:var(--card);padding:10px 14px;border-radius:10px;cursor:pointer;min-height:44px}
+button.p{background:var(--pri);color:var(--priInk);border-color:var(--pri);font-weight:600}
+button:disabled{opacity:.5;cursor:not-allowed}
+button:focus-visible,input:focus-visible,textarea:focus-visible{outline:3px solid var(--acc);outline-offset:2px}
+.status{display:flex;align-items:center;gap:10px;margin-top:12px;padding:10px 12px;border-radius:10px;background:var(--chip);font-weight:600}
+.dot{width:12px;height:12px;border-radius:50%;background:var(--mute);flex:none}
+.status.ok .dot{background:var(--ok)}.status.warn .dot{background:var(--warn)}.status.err .dot{background:var(--err)}
+.meter{height:10px;background:var(--chip);border-radius:6px;overflow:hidden;margin-top:8px}
+.meter i{display:block;height:100%;width:0;background:var(--pri);transition:width .15s}
+.small{font-size:.85rem;color:var(--mute)}
+textarea{width:100%;min-height:140px;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--bg);font-size:1.15rem;resize:vertical}
+.typed{display:flex;gap:8px;margin-top:12px}
+.typed input{flex:1;min-width:0;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--bg)}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{background:var(--chip);border:1px solid var(--line);border-radius:999px;padding:6px 12px;min-height:36px;font-size:.92rem}
+ol{margin:0;padding-left:20px}li{margin:4px 0}
+.hist li{color:var(--mute)}.hist b{color:var(--ink);font-weight:600}
+.demo{border-top:1px dashed var(--line);margin-top:14px;padding-top:12px}
+footer{max-width:1100px;margin:0 auto;padding:0 clamp(16px,4vw,32px) 32px;color:var(--mute);font-size:.85rem}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+</style>
+</head>
+<body>
+<header>
+  <div><h1>Sign<span>Speak</span> ISL</h1><p class="tag">Turn supported Indian Sign Language signs into text and speech.</p></div>
+  <button id="themeBtn" aria-label="Toggle light or dark theme">Theme</button>
+</header>
+
+<main>
+  <div class="banner" role="note"><strong>Prototype interface.</strong> No recognition model is connected yet. The vocabulary below is a placeholder and must be validated with ISL sources or a fluent signer before use. This tool does not replace a qualified interpreter in medical, legal or financial situations. Always review the text before speaking it.</div>
+
+  <div class="grid">
+    <section aria-labelledby="camH">
+      <h2 id="camH">1. Camera</h2>
+      <div class="video" id="video"><video id="cam" playsinline muted></video><div class="ph" id="ph">Camera is off. Press “Start camera” and allow access when your browser asks. Video stays on your device.</div></div>
+      <div class="row">
+        <button class="p" id="startBtn">Start camera</button>
+        <button id="stopBtn" disabled>Stop</button>
+        <button id="resetBtn">Reset</button>
+      </div>
+      <div class="status" id="status" role="status" aria-live="polite"><span class="dot"></span><span id="statusTxt">Idle. Camera is off.</span></div>
+      <div class="meter" aria-hidden="true"><i id="meter"></i></div>
+      <p class="small" id="confTxt">Confidence: n/a</p>
+
+      <div class="demo">
+        <h2>Interface demo (no camera model)</h2>
+        <p class="small">Use these to see how the stabilizer, uncertainty message and speech behave. Each button feeds simulated frames into the same pipeline a real model will use.</p>
+        <div class="chips" id="demoChips"></div>
+        <div class="row"><button id="unsureBtn">Simulate unsure prediction</button></div>
+      </div>
+    </section>
+
+    <section aria-labelledby="txtH">
+      <h2 id="txtH">2. Recognized message</h2>
+      <label class="sr" for="msg">Recognized message (editable)</label>
+      <textarea id="msg" placeholder="Recognized signs appear here. You can also type or edit."></textarea>
+      <div class="row">
+        <button class="p" id="speakBtn">Speak</button>
+        <button id="stopSpeakBtn">Stop speaking</button>
+        <button id="copyBtn">Copy</button>
+        <button id="clearBtn">Clear</button>
+      </div>
+      <p class="small" id="speechNote" role="status" aria-live="polite"></p>
+      <form class="typed" id="typedForm"><label class="sr" for="typed">Type a phrase manually</label><input id="typed" placeholder="Manual fallback: type a phrase"><button type="submit">Add</button></form>
+
+      <h2 style="margin-top:18px">Recent phrases</h2>
+      <ol class="hist" id="hist"><li>Nothing yet.</li></ol>
+    </section>
+  </div>
+
+  <div class="grid">
+    <section aria-labelledby="vocH">
+      <h2 id="vocH">Supported vocabulary (placeholder, unvalidated)</h2>
+      <div class="chips" id="vocab"></div>
+    </section>
+    <section aria-labelledby="howH">
+      <h2 id="howH">How to use</h2>
+      <ol>
+        <li>Start the camera and keep your hands inside the frame with good light.</li>
+        <li>Show one supported sign and hold it steady for about a second.</li>
+        <li>Check the text. Edit or clear it if it is wrong.</li>
+        <li>Press Speak. If the status says “Not sure”, repeat the sign or type instead.</li>
+      </ol>
+    </section>
+  </div>
+</main>
+<footer>Privacy: video is processed in your browser only and is never recorded or uploaded by this page. Hand-landmark and classifier integration comes in the Recognition module.</footer>
+
+<script>
+// ---- Config (tune later with real model) ----
+const VOCAB = ["Help","Water","Doctor","Medicine","Money","Thank you","Yes","No","Please","Wait"];
+const CFG = { window: 8, minVotes: 6, minConf: 0.7, cooldownMs: 1500 };
+
+// ---- Recognizer interface: replace with MediaPipe + /predict call later ----
+// Must resolve to {label: string|null, conf: number} per frame.
+const recognizer = { connected: false, async predict(/* landmarks */){ return null; } };
+
+const $ = id => document.getElementById(id);
+const cam=$("cam"), videoBox=$("video"), msg=$("msg");
+let stream=null, frames=[], lastLabel=null, lastAt=0, history=[];
+
+function setStatus(kind, text){
+  const s=$("status"); s.className="status "+kind; $("statusTxt").textContent=text;
+}
+function setConf(c){
+  $("meter").style.width=(c==null?0:Math.round(c*100))+"%";
+  $("confTxt").textContent="Confidence: "+(c==null?"n/a":Math.round(c*100)+"%");
+}
+
+// ---- Camera ----
+async function startCamera(){
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
+    setStatus("err","This browser does not support camera access. Use the manual text box."); return;
+  }
+  try{
+    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"user",width:{ideal:640},height:{ideal:480}},audio:false});
+    cam.srcObject=stream; await cam.play(); videoBox.classList.add("on");
+    $("startBtn").disabled=true; $("stopBtn").disabled=false;
+    setStatus(recognizer.connected?"ok":"warn", recognizer.connected?"Listening for signs…":"Camera on. No model connected yet (interface prototype).");
+  }catch(e){
+    const m={NotAllowedError:"Camera permission was denied. Allow camera access in your browser settings and try again.",
+      NotFoundError:"No camera was found on this device.",NotReadableError:"The camera is in use by another app.",
+      SecurityError:"Camera is blocked in this embedded view. Open the page in its own tab."}[e.name]||"Could not start the camera ("+e.name+").";
+    setStatus("err",m+" You can still type your message.");
+  }
+}
+function stopCamera(){
+  if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}
+  cam.srcObject=null; videoBox.classList.remove("on");
+  $("startBtn").disabled=false; $("stopBtn").disabled=true;
+  frames=[]; setConf(null); setStatus("","Idle. Camera is off.");
+}
+function resetAll(){ stopCamera(); msg.value=""; history=[]; lastLabel=null; renderHist(); stopSpeak(); }
+
+// ---- Stabilizer: majority vote over last N frames + confidence + cooldown ----
+function pushFrame(label, conf){
+  frames.push({label,conf}); if(frames.length>CFG.window) frames.shift();
+  setConf(conf);
+  const votes={}; frames.forEach(f=>{ if(f.label) votes[f.label]=(votes[f.label]||0)+1; });
+  const top=Object.entries(votes).sort((a,b)=>b[1]-a[1])[0];
+  if(!top){ setStatus("warn","Not sure. Try again or type your message."); return; }
+  const [lab,n]=top;
+  const avg=frames.filter(f=>f.label===lab).reduce((s,f)=>s+f.conf,0)/n;
+  if(n>=CFG.minVotes && avg>=CFG.minConf){
+    const now=Date.now();
+    if(lab===lastLabel && now-lastAt<CFG.cooldownMs){ setStatus("ok","Holding “"+lab+"”…"); return; }
+    commit(lab); lastLabel=lab; lastAt=now; frames=[];
+    setStatus("ok","Recognized “"+lab+"”.");
+  }else if(frames.length>=CFG.window){
+    setStatus("warn","Not sure. Hold the sign steadier or type your message.");
+  }else{
+    setStatus("ok","Reading sign…");
+  }
+}
+function commit(label){
+  msg.value=(msg.value.trim()?msg.value.trim()+" ":"")+label;
+  history.unshift({t:label,at:new Date()}); history=history.slice(0,8); renderHist();
+}
+
+// ---- Demo feeds (simulated frames, clearly labelled in UI) ----
+function simulate(label, conf, count=10){
+  frames=[]; let i=0;
+  const id=setInterval(()=>{
+    const jitter=(Math.random()-.5)*0.1;
+    pushFrame(label, Math.max(0,Math.min(1,conf+jitter)));
+    if(++i>=count) clearInterval(id);
+  },90);
+}
+
+// ---- History ----
+function renderHist(){
+  const h=$("hist");
+  h.innerHTML="";
+  if(!history.length){ h.innerHTML="<li>Nothing yet.</li>"; return; }
+  history.forEach(x=>{
+    const li=document.createElement("li");
+    const b=document.createElement("b"); b.textContent=x.t;
+    li.append(b," at "+x.at.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit"}));
+    h.append(li);
+  });
+}
+
+// ---- Speech ----
+const synth=window.speechSynthesis;
+function speak(){
+  const text=msg.value.trim();
+  if(!synth||!window.SpeechSynthesisUtterance){ $("speechNote").textContent="Speech is not supported in this browser. Copy the text instead."; return; }
+  if(!text){ $("speechNote").textContent="There is no text to speak yet."; return; }
+  synth.cancel();
+  const u=new SpeechSynthesisUtterance(text); u.lang="en-IN";
+  u.onstart=()=>$("speechNote").textContent="Speaking…";
+  u.onend=()=>$("speechNote").textContent="";
+  u.onerror=()=>$("speechNote").textContent="Speech failed. Try again or copy the text.";
+  synth.speak(u);
+}
+function stopSpeak(){ if(synth) synth.cancel(); $("speechNote").textContent=""; }
+
+// ---- Wiring ----
+VOCAB.forEach(w=>{
+  const c=document.createElement("span"); c.className="chip"; c.textContent=w; $("vocab").append(c);
+  const b=document.createElement("button"); b.className="chip"; b.textContent="Simulate: "+w;
+  b.addEventListener("click",()=>simulate(w,0.9)); $("demoChips").append(b);
+});
+$("startBtn").onclick=startCamera; $("stopBtn").onclick=stopCamera; $("resetBtn").onclick=resetAll;
+$("unsureBtn").onclick=()=>{
+  frames=[]; let i=0; const labs=["Help","Water","Doctor","Money"];
+  const id=setInterval(()=>{ pushFrame(labs[i%labs.length],0.3+Math.random()*0.2); if(++i>=CFG.window+2) clearInterval(id); },90);
+};
+$("speakBtn").onclick=speak; $("stopSpeakBtn").onclick=stopSpeak;
+$("clearBtn").onclick=()=>{ msg.value=""; msg.focus(); };
+$("copyBtn").onclick=async()=>{
+  try{ await navigator.clipboard.writeText(msg.value); $("speechNote").textContent="Copied."; }
+  catch(e){ msg.select(); $("speechNote").textContent="Press Ctrl+C to copy the selected text."; }
+};
+$("typedForm").addEventListener("submit",e=>{
+  e.preventDefault(); const v=$("typed").value.trim(); if(!v) return;
+  msg.value=(msg.value.trim()?msg.value.trim()+" ":"")+v; $("typed").value="";
+});
+$("themeBtn").onclick=()=>{
+  const r=document.documentElement;
+  const dark=r.dataset.theme?r.dataset.theme==="dark":matchMedia("(prefers-color-scheme: dark)").matches;
+  r.dataset.theme=dark?"light":"dark";
+};
+window.addEventListener("pagehide",stopCamera);
+setStatus("","Idle. Camera is off.");
+</script>
+</body>
+</html>
